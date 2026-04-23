@@ -39,6 +39,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id").ValueGeneratedNever();
             e.Property(x => x.Nombre).HasColumnName("nombre").IsRequired();
+            e.HasData(
+                new Rol { Id = 1, Nombre = "Admin" },
+                new Rol { Id = 2, Nombre = "Miembro" });
         });
 
         modelBuilder.Entity<OrganizacionUsuario>(e =>
@@ -68,6 +71,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id").ValueGeneratedNever();
             e.Property(x => x.Nombre).HasColumnName("nombre").IsRequired();
+            e.HasData(
+                new Estado { Id = 1, Nombre = "Pendiente" },
+                new Estado { Id = 2, Nombre = "En Progreso" },
+                new Estado { Id = 3, Nombre = "Completado" });
         });
 
         modelBuilder.Entity<Prioridad>(e =>
@@ -76,6 +83,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id").ValueGeneratedNever();
             e.Property(x => x.Nombre).HasColumnName("nombre").IsRequired();
+            e.HasData(
+                new Prioridad { Id = 1, Nombre = "Baja" },
+                new Prioridad { Id = 2, Nombre = "Media" },
+                new Prioridad { Id = 3, Nombre = "Alta" });
         });
 
         modelBuilder.Entity<Tarea>(e =>
