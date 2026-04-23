@@ -6,9 +6,14 @@ using PruebaTecnica_Multitenant.API.Models;
 
 namespace PruebaTecnica_Multitenant.API.Services;
 
-public class TokenService : ITokenService
+public class TokenService(IConfiguration config) : ITokenService
 {
-    public string GenerateToken(Usuario usuario, Guid organizacionId, string rol)
+    private string Secret   => config["Jwt:Secret"]!;
+    private string Issuer   => config["Jwt:Issuer"]!;
+    private string Audience => config["Jwt:Audience"]!;
+    private int    Expiry   => config.GetValue<int>("Jwt:ExpiryMinutes", 60);
+
+    public TokenResult GenerateToken(Usuario usuario, Guid organizacionId, string rol)
     {
         var claims = new[]
         {
@@ -18,7 +23,8 @@ public class TokenService : ITokenService
             new Claim(ClaimTypes.Role, rol)
         };
 
-        return BuildToken(claims, GetExpiry());
+        var expiresAt = DateTime.UtcNow.AddMinutes(Expiry);
+        return new TokenResult(BuildToken(claims, expiresAt), expiresAt);
     }
 
     // Token de vida corta (5 min) que solo contiene los IDs de orgs permitidas.
@@ -31,15 +37,11 @@ public class TokenService : ITokenService
             new Claim("orgs", string.Join(",", orgIds))
         };
 
-        return BuildToken(claims, expiryMinutes: 5);
+        return BuildToken(claims, DateTime.UtcNow.AddMinutes(5));
     }
 
     public ClaimsPrincipal? ValidateSelectionToken(string token)
     {
-        var secret   = Environment.GetEnvironmentVariable("JWT_SECRET")!;
-        var issuer   = Environment.GetEnvironmentVariable("JWT_ISSUER")!;
-        var audience = Environment.GetEnvironmentVariable("JWT_AUDIENCE")!;
-
         var handler    = new JwtSecurityTokenHandler();
         var parameters = new TokenValidationParameters
         {
@@ -47,17 +49,17 @@ public class TokenService : ITokenService
             ValidateAudience         = true,
             ValidateLifetime         = true,
             ValidateIssuerSigningKey = true,
-            ValidIssuer              = issuer,
-            ValidAudience            = audience,
-            IssuerSigningKey         = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret))
+            ValidIssuer              = Issuer,
+            ValidAudience            = Audience,
+            IssuerSigningKey         = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(Secret))
         };
 
         try
         {
             var principal = handler.ValidateToken(token, parameters, out _);
 
-            // Debe tener "orgs" y NO tener "org" (para que no se pase un JWT completo)
-            if (principal.FindFirst("orgs") is null) return null;
+            // Debe tener "orgs" y NO "org" para evitar que se pase un JWT completo
+            if (principal.FindFirst("orgs") is null)  return null;
             if (principal.FindFirst("org")  is not null) return null;
 
             return principal;
@@ -68,27 +70,20 @@ public class TokenService : ITokenService
         }
     }
 
-    // ── Helpers ─────────────────────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static string BuildToken(IEnumerable<Claim> claims, int expiryMinutes)
+    private string BuildToken(IEnumerable<Claim> claims, DateTime expiresAt)
     {
-        var secret   = Environment.GetEnvironmentVariable("JWT_SECRET")!;
-        var issuer   = Environment.GetEnvironmentVariable("JWT_ISSUER")!;
-        var audience = Environment.GetEnvironmentVariable("JWT_AUDIENCE")!;
-
-        var key   = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
+        var key   = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(Secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
         var token = new JwtSecurityToken(
-            issuer:             issuer,
-            audience:           audience,
+            issuer:             Issuer,
+            audience:           Audience,
             claims:             claims,
-            expires:            DateTime.UtcNow.AddMinutes(expiryMinutes),
+            expires:            expiresAt,
             signingCredentials: creds);
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
-
-    private static int GetExpiry() =>
-        int.Parse(Environment.GetEnvironmentVariable("JWT_EXPIRY_MINUTES") ?? "60");
 }

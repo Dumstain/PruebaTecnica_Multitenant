@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PruebaTecnica_Multitenant.API.Data;
+using PruebaTecnica_Multitenant.API.DTOs.Common;
 using PruebaTecnica_Multitenant.API.DTOs.Tareas;
 using PruebaTecnica_Multitenant.API.Extensions;
 using PruebaTecnica_Multitenant.API.Models;
@@ -11,58 +12,85 @@ namespace PruebaTecnica_Multitenant.API.Controllers;
 [ApiController]
 [Route("api/tareas")]
 [Authorize]
+[Produces("application/json")]
 public class TareasController(AppDbContext db) : ControllerBase
 {
     private const int EstadoCompletada = 3;
 
-    // GET /api/tareas?estadoId=1&usuarioId=...
+    /// <summary>
+    /// Devuelve todas las tareas de la organización del usuario autenticado.
+    /// Admin puede filtrar por estado y por usuario asignado.
+    /// Miembro solo puede filtrar por estado (siempre ve todas las tareas de su org).
+    /// </summary>
+    /// <param name="estadoId">
+    /// Filtro opcional por estado:
+    /// 1 = Pendiente, 2 = En Progreso, 3 = Completado.
+    /// </param>
+    /// <param name="usuarioId">
+    /// Filtro opcional por usuario asignado. Solo aplica si el usuario autenticado es Admin.
+    /// </param>
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] int? estadoId, [FromQuery] Guid? usuarioId)
+    [ProducesResponseType(typeof(List<TareaResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GetAll([FromQuery] EstadoEnum? estadoId, [FromQuery] Guid? usuarioId)
     {
-        var orgId = User.GetOrgId();
-
         var query = db.Tareas
-            .Where(t => t.OrganizacionId == orgId)
+            .Where(t => t.OrganizacionId == User.GetOrgId())
             .Include(t => t.Estado)
             .Include(t => t.Prioridad)
             .Include(t => t.Usuario)
             .AsQueryable();
 
         if (estadoId.HasValue)
-            query = query.Where(t => t.EstadoId == estadoId.Value);
+            query = query.Where(t => t.EstadoId == (int)estadoId.Value);
 
-        if (usuarioId.HasValue)
+        // El filtro por usuario asignado es exclusivo del Admin
+        if (User.IsAdmin() && usuarioId.HasValue)
             query = query.Where(t => t.UsuarioId == usuarioId.Value);
 
-        var tareas = await query.Select(t => MapToResponse(t)).ToListAsync();
-        return Ok(tareas);
+        return Ok(await query.Select(t => MapToResponse(t)).ToListAsync());
     }
 
-    // GET /api/tareas/{id}
+    /// <summary>Obtiene una tarea por ID dentro de la organización del usuario autenticado.</summary>
     [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(TareaResponse),   StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> GetById(Guid id)
     {
         var tarea = await FindInOrg(id);
-        return tarea is null ? NotFound() : Ok(MapToResponse(tarea));
+        if (tarea is null)
+            return NotFound(new MessageResponse { Message = "Tarea no encontrada." });
+
+        return Ok(MapToResponse(tarea));
     }
 
-    // POST /api/tareas
+    /// <summary>
+    /// Crea una nueva tarea en estado Pendiente.
+    /// Admin puede asignarla a cualquier miembro de la org; Miembro solo a sí mismo.
+    /// </summary>
     [HttpPost]
+    [ProducesResponseType(typeof(object),          StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Create(CreateTareaRequest request)
     {
         var orgId  = User.GetOrgId();
         var userId = User.GetUserId();
 
-        // Miembro solo puede crear tareas asignadas a sí mismo
         if (!User.IsAdmin() && request.UsuarioId != userId)
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden,
+                new MessageResponse { Message = "Un Miembro solo puede crear tareas asignadas a sí mismo." });
 
-        // El usuario asignado debe pertenecer a la organización
+        if (request.FechaLimite <= DateTime.UtcNow)
+            return BadRequest(new MessageResponse { Message = "La fecha límite debe ser una fecha futura." });
+
         var asignadoEnOrg = await db.OrganizacionesUsuarios
             .AnyAsync(ou => ou.OrganizacionId == orgId && ou.UsuarioId == request.UsuarioId);
 
         if (!asignadoEnOrg)
-            return BadRequest(new { message = "El usuario asignado no pertenece a la organización." });
+            return BadRequest(new MessageResponse { Message = "El usuario asignado no pertenece a la organización." });
 
         var tarea = new Tarea
         {
@@ -83,60 +111,85 @@ public class TareasController(AppDbContext db) : ControllerBase
         return CreatedAtAction(nameof(GetById), new { id = tarea.Id }, new { id = tarea.Id });
     }
 
-    // PUT /api/tareas/{id}
+    /// <summary>
+    /// Actualiza título, descripción, prioridad y fecha límite de una tarea.
+    /// Admin puede editar cualquier tarea; Miembro solo las suyas.
+    /// </summary>
     [HttpPut("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Update(Guid id, UpdateTareaRequest request)
     {
         var tarea = await FindInOrg(id);
-        if (tarea is null) return NotFound();
+        if (tarea is null)
+            return NotFound(new MessageResponse { Message = "Tarea no encontrada." });
 
-        // Miembro solo puede editar sus propias tareas
         if (!User.IsAdmin() && tarea.UsuarioId != User.GetUserId())
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden,
+                new MessageResponse { Message = "Solo puedes editar tus propias tareas." });
 
-        tarea.Titulo       = request.Titulo;
-        tarea.Descripcion  = request.Descripcion;
-        tarea.PrioridadId  = request.PrioridadId;
-        tarea.FechaLimite  = request.FechaLimite;
+        if (request.FechaLimite <= DateTime.UtcNow)
+            return BadRequest(new MessageResponse { Message = "La fecha límite debe ser una fecha futura." });
+
+        tarea.Titulo      = request.Titulo;
+        tarea.Descripcion = request.Descripcion;
+        tarea.PrioridadId = request.PrioridadId;
+        tarea.FechaLimite = request.FechaLimite;
 
         await db.SaveChangesAsync();
         return NoContent();
     }
 
-    // DELETE /api/tareas/{id} — solo Admin
+    /// <summary>Elimina una tarea. Solo Admin.</summary>
     [HttpDelete("{id:guid}")]
     [Authorize(Policy = "AdminOnly")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Delete(Guid id)
     {
         var tarea = await FindInOrg(id);
-        if (tarea is null) return NotFound();
+        if (tarea is null)
+            return NotFound(new MessageResponse { Message = "Tarea no encontrada." });
 
         db.Tareas.Remove(tarea);
         await db.SaveChangesAsync();
         return NoContent();
     }
 
-    // PATCH /api/tareas/{id}/estado
+    /// <summary>
+    /// Cambia el estado de una tarea (Pendiente → En Progreso → Completada).
+    /// Solo Admin o el usuario asignado. Una tarea Completada no puede cambiar de estado.
+    /// </summary>
     [HttpPatch("{id:guid}/estado")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> CambiarEstado(Guid id, CambiarEstadoRequest request)
     {
         var tarea = await FindInOrg(id);
-        if (tarea is null) return NotFound();
+        if (tarea is null)
+            return NotFound(new MessageResponse { Message = "Tarea no encontrada." });
 
-        // Una tarea Completada no puede volver a otro estado
         if (tarea.EstadoId == EstadoCompletada)
-            return BadRequest(new { message = "Una tarea Completada no puede cambiar de estado." });
+            return BadRequest(new MessageResponse { Message = "Una tarea Completada no puede cambiar de estado." });
 
-        // Solo el Admin o el usuario asignado pueden cambiar el estado
         if (!User.IsAdmin() && tarea.UsuarioId != User.GetUserId())
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden,
+                new MessageResponse { Message = "Solo el Admin o el asignado pueden cambiar el estado." });
 
-        tarea.EstadoId = request.EstadoId;
+        tarea.EstadoId = (int)request.EstadoId;
         await db.SaveChangesAsync();
         return NoContent();
     }
 
-    // ── Helpers ─────────────────────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
     private async Task<Tarea?> FindInOrg(Guid id) =>
         await db.Tareas

@@ -10,16 +10,18 @@ namespace PruebaTecnica_Multitenant.API.Controllers;
 [ApiController]
 [Route("api/usuarios")]
 [Authorize(Policy = "AdminOnly")]
+[Produces("application/json")]
 public class UsuariosController(AppDbContext db) : ControllerBase
 {
-    // GET /api/usuarios — devuelve los usuarios de la organización del Admin
+    /// <summary>Lista todos los usuarios de la organización del Admin autenticado.</summary>
     [HttpGet]
+    [ProducesResponseType(typeof(List<UsuarioResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> GetAll()
     {
-        var orgId = User.GetOrgId();
-
         var usuarios = await db.OrganizacionesUsuarios
-            .Where(ou => ou.OrganizacionId == orgId)
+            .Where(ou => ou.OrganizacionId == User.GetOrgId())
             .Include(ou => ou.Usuario)
             .Include(ou => ou.Rol)
             .Select(ou => new UsuarioResponse

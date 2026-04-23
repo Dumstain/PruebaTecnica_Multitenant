@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PruebaTecnica_Multitenant.API.Data;
 using PruebaTecnica_Multitenant.API.DTOs.Auth;
+using PruebaTecnica_Multitenant.API.DTOs.Common;
 using PruebaTecnica_Multitenant.API.Models;
 using PruebaTecnica_Multitenant.API.Services;
 
@@ -10,14 +11,18 @@ namespace PruebaTecnica_Multitenant.API.Controllers;
 
 [ApiController]
 [Route("api/auth")]
+[Produces("application/json")]
 public class AuthController(AppDbContext db, ITokenService tokenService) : ControllerBase
 {
-    // Crea usuario + organización y le asigna rol Admin
+    /// <summary>Registra un nuevo usuario y crea su organización con rol Admin.</summary>
     [HttpPost("register")]
+    [ProducesResponseType(typeof(AuthResponse),    StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Register(RegisterRequest request)
     {
         if (await db.Usuarios.AnyAsync(u => u.Email == request.Email))
-            return Conflict(new { message = "El email ya está registrado." });
+            return Conflict(new MessageResponse { Message = "El email ya está registrado." });
 
         var usuario = new Usuario
         {
@@ -42,20 +47,26 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
         });
         await db.SaveChangesAsync();
 
-        var token = tokenService.GenerateToken(usuario, organizacion.Id, "Admin");
-        return Ok(new AuthResponse { Token = token, ExpiresAt = ExpiresAt() });
+        var result = tokenService.GenerateToken(usuario, organizacion.Id, "Admin");
+        return Ok(new AuthResponse { Token = result.Token, ExpiresAt = result.ExpiresAt });
     }
 
-    // Login inteligente:
-    //   1 organización  → JWT completo de inmediato
-    //   2+ organizaciones → selection token + lista de orgs para elegir
+    /// <summary>
+    /// Login por email + password.
+    /// Si el usuario pertenece a 1 organización devuelve el JWT directamente.
+    /// Si pertenece a 2 o más devuelve un selection token + lista de organizaciones.
+    /// </summary>
     [HttpPost("login")]
+    [ProducesResponseType(typeof(AuthResponse),    StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(MultiOrgResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Login(LoginRequest request)
     {
         var usuario = await db.Usuarios.FirstOrDefaultAsync(u => u.Email == request.Email);
 
         if (usuario is null || !BCrypt.Net.BCrypt.Verify(request.Password, usuario.Password))
-            return Unauthorized(new { message = "Credenciales inválidas." });
+            return Unauthorized(new MessageResponse { Message = "Credenciales inválidas." });
 
         var membresias = await db.OrganizacionesUsuarios
             .Where(ou => ou.UsuarioId == usuario.Id)
@@ -64,17 +75,17 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
             .ToListAsync();
 
         if (membresias.Count == 0)
-            return Unauthorized(new { message = "El usuario no pertenece a ninguna organización." });
+            return Unauthorized(new MessageResponse { Message = "El usuario no pertenece a ninguna organización." });
 
-        // Caso: única organización — login automático
+        // Una sola organización → JWT directo
         if (membresias.Count == 1)
         {
-            var m     = membresias[0];
-            var token = tokenService.GenerateToken(usuario, m.OrganizacionId, m.Rol.Nombre);
-            return Ok(new AuthResponse { Token = token, ExpiresAt = ExpiresAt() });
+            var m      = membresias[0];
+            var result = tokenService.GenerateToken(usuario, m.OrganizacionId, m.Rol.Nombre);
+            return Ok(new AuthResponse { Token = result.Token, ExpiresAt = result.ExpiresAt });
         }
 
-        // Caso: varias organizaciones — devuelve selection token + lista para elegir
+        // Varias organizaciones → selection token + lista para elegir
         var selectionToken = tokenService.GenerateSelectionToken(
             usuario, membresias.Select(m => m.OrganizacionId));
 
@@ -89,14 +100,16 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
         });
     }
 
-    // Segunda fase del login multi-org:
-    // Recibe el selection token + el ID de la org elegida → devuelve JWT completo
+    /// <summary>Segunda fase del login multi-org: elige organización con el selection token.</summary>
     [HttpPost("login/organizacion")]
+    [ProducesResponseType(typeof(AuthResponse),    StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(MessageResponse), StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> SelectOrganizacion(SelectOrgRequest request)
     {
         var principal = tokenService.ValidateSelectionToken(request.SelectionToken);
         if (principal is null)
-            return Unauthorized(new { message = "Selection token inválido o expirado." });
+            return Unauthorized(new MessageResponse { Message = "Selection token inválido o expirado." });
 
         var userId = Guid.Parse(principal.FindFirst(ClaimTypes.NameIdentifier)!.Value);
 
@@ -106,10 +119,11 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
             .ToHashSet();
 
         if (!orgsPermitidas.Contains(request.OrganizacionId))
-            return Unauthorized(new { message = "No perteneces a esa organización." });
+            return Unauthorized(new MessageResponse { Message = "No perteneces a esa organización." });
 
         var usuario = await db.Usuarios.FindAsync(userId);
-        if (usuario is null) return Unauthorized();
+        if (usuario is null)
+            return Unauthorized(new MessageResponse { Message = "Usuario no encontrado." });
 
         var membresia = await db.OrganizacionesUsuarios
             .Include(ou => ou.Rol)
@@ -117,13 +131,9 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
                                     && ou.OrganizacionId == request.OrganizacionId);
 
         if (membresia is null)
-            return Unauthorized(new { message = "No perteneces a esa organización." });
+            return Unauthorized(new MessageResponse { Message = "No perteneces a esa organización." });
 
-        var token = tokenService.GenerateToken(usuario, request.OrganizacionId, membresia.Rol.Nombre);
-        return Ok(new AuthResponse { Token = token, ExpiresAt = ExpiresAt() });
+        var result = tokenService.GenerateToken(usuario, request.OrganizacionId, membresia.Rol.Nombre);
+        return Ok(new AuthResponse { Token = result.Token, ExpiresAt = result.ExpiresAt });
     }
-
-    private static DateTime ExpiresAt() =>
-        DateTime.UtcNow.AddMinutes(
-            int.Parse(Environment.GetEnvironmentVariable("JWT_EXPIRY_MINUTES") ?? "60"));
 }

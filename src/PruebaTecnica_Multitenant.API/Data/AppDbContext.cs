@@ -100,8 +100,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.Property(x => x.Descripcion).HasColumnName("descripcion").IsRequired();
             e.Property(x => x.EstadoId).HasColumnName("estado_id");
             e.Property(x => x.PrioridadId).HasColumnName("prioridad_id");
-            e.Property(x => x.FechaDeCreacion).HasColumnName("fecha_de_creacion").HasColumnType("timestamp");
-            e.Property(x => x.FechaLimite).HasColumnName("fecha_limite").HasColumnType("timestamp");
+            e.Property(x => x.FechaDeCreacion).HasColumnName("fecha_de_creacion").HasColumnType("timestamptz");
+            e.Property(x => x.FechaLimite).HasColumnName("fecha_limite").HasColumnType("timestamptz");
 
             e.HasOne(x => x.Organizacion)
                 .WithMany(x => x.Tareas)
