@@ -13,7 +13,7 @@ namespace PruebaTecnica_Multitenant.API.Controllers;
 [Route("api/tareas")]
 [Authorize]
 [Produces("application/json")]
-public class TareasController(AppDbContext db) : ControllerBase
+public class TareasController(AppDbContext db, ILogger<TareasController> logger) : ControllerBase
 {
     private const int EstadoCompletada = 3;
 
@@ -106,6 +106,7 @@ public class TareasController(AppDbContext db) : ControllerBase
         db.Tareas.Add(tarea);
         await db.SaveChangesAsync();
 
+        logger.LogInformation("Tarea {TareaId} creada por {UserId} en org {OrgId}", tarea.Id, userId, orgId);
         return CreatedAtAction(nameof(GetById), new { id = tarea.Id }, new { id = tarea.Id });
     }
 
@@ -156,6 +157,7 @@ public class TareasController(AppDbContext db) : ControllerBase
 
         db.Tareas.Remove(tarea);
         await db.SaveChangesAsync();
+        logger.LogInformation("Tarea {TareaId} eliminada por admin {UserId}", id, User.GetUserId());
         return NoContent();
     }
 
@@ -176,14 +178,19 @@ public class TareasController(AppDbContext db) : ControllerBase
             return NotFound(new MessageResponse { Message = "Tarea no encontrada." });
 
         if (tarea.EstadoId == EstadoCompletada)
+        {
+            logger.LogWarning("Intento de cambiar estado de tarea completada {TareaId} por {UserId}", id, User.GetUserId());
             return BadRequest(new MessageResponse { Message = "Una tarea Completada no puede cambiar de estado." });
+        }
 
         if (!User.IsAdmin() && tarea.UsuarioId != User.GetUserId())
             return StatusCode(StatusCodes.Status403Forbidden,
                 new MessageResponse { Message = "Solo el Admin o el asignado pueden cambiar el estado." });
 
+        var estadoAnterior = tarea.EstadoId;
         tarea.EstadoId = (int)request.EstadoId;
         await db.SaveChangesAsync();
+        logger.LogInformation("Tarea {TareaId}: estado {De} → {A} por {UserId}", id, estadoAnterior, tarea.EstadoId, User.GetUserId());
         return NoContent();
     }
 

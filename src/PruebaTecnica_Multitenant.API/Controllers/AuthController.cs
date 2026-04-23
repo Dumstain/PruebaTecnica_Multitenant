@@ -12,7 +12,7 @@ namespace PruebaTecnica_Multitenant.API.Controllers;
 [ApiController]
 [Route("api/auth")]
 [Produces("application/json")]
-public class AuthController(AppDbContext db, ITokenService tokenService) : ControllerBase
+public class AuthController(AppDbContext db, ITokenService tokenService, ILogger<AuthController> logger) : ControllerBase
 {
     /// <summary>Registra un nuevo usuario y crea su organización con rol Admin.</summary>
     [HttpPost("register")]
@@ -22,7 +22,10 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
     public async Task<IActionResult> Register(RegisterRequest request)
     {
         if (await db.Usuarios.AnyAsync(u => u.Email == request.Email))
+        {
+            logger.LogWarning("Registro fallido: el email {Email} ya existe", request.Email);
             return Conflict(new MessageResponse { Message = "El email ya está registrado." });
+        }
 
         var usuario = new Usuario
         {
@@ -47,6 +50,7 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
         });
         await db.SaveChangesAsync();
 
+        logger.LogInformation("Usuario {Email} registrado. Org: {OrgId}", request.Email, organizacion.Id);
         var result = tokenService.GenerateToken(usuario, organizacion.Id, "Admin");
         return Ok(new AuthResponse { Token = result.Token, ExpiresAt = result.ExpiresAt });
     }
@@ -66,7 +70,10 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
         var usuario = await db.Usuarios.FirstOrDefaultAsync(u => u.Email == request.Email);
 
         if (usuario is null || !BCrypt.Net.BCrypt.Verify(request.Password, usuario.Password))
+        {
+            logger.LogWarning("Login fallido para {Email}", request.Email);
             return Unauthorized(new MessageResponse { Message = "Credenciales inválidas." });
+        }
 
         var membresias = await db.OrganizacionesUsuarios
             .Where(ou => ou.UsuarioId == usuario.Id)
@@ -75,13 +82,17 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
             .ToListAsync();
 
         if (membresias.Count == 0)
+        {
+            logger.LogWarning("Login fallido: {Email} sin organizaciones", usuario.Email);
             return Unauthorized(new MessageResponse { Message = "El usuario no pertenece a ninguna organización." });
+        }
 
         // Una sola organización → JWT directo
         if (membresias.Count == 1)
         {
             var m      = membresias[0];
             var result = tokenService.GenerateToken(usuario, m.OrganizacionId, m.Rol.Nombre);
+            logger.LogInformation("Login exitoso: {Email} → org {OrgId} ({Rol})", usuario.Email, m.OrganizacionId, m.Rol.Nombre);
             return Ok(new AuthResponse { Token = result.Token, ExpiresAt = result.ExpiresAt });
         }
 
@@ -89,6 +100,7 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
         var selectionToken = tokenService.GenerateSelectionToken(
             usuario, membresias.Select(m => m.OrganizacionId));
 
+        logger.LogInformation("Login multi-org: {Email} tiene {Count} organizaciones, se emitió selection token", usuario.Email, membresias.Count);
         return Ok(new MultiOrgResponse
         {
             SelectionToken = selectionToken,
@@ -109,7 +121,10 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
     {
         var principal = tokenService.ValidateSelectionToken(request.SelectionToken);
         if (principal is null)
+        {
+            logger.LogWarning("Selection token inválido o expirado en /login/organizacion");
             return Unauthorized(new MessageResponse { Message = "Selection token inválido o expirado." });
+        }
 
         var userId = Guid.Parse(principal.FindFirst(ClaimTypes.NameIdentifier)!.Value);
 
@@ -119,7 +134,10 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
             .ToHashSet();
 
         if (!orgsPermitidas.Contains(request.OrganizacionId))
+        {
+            logger.LogWarning("Usuario {UserId} intentó seleccionar org {OrgId} que no le pertenece", userId, request.OrganizacionId);
             return Unauthorized(new MessageResponse { Message = "No perteneces a esa organización." });
+        }
 
         var usuario = await db.Usuarios.FindAsync(userId);
         if (usuario is null)
@@ -134,6 +152,7 @@ public class AuthController(AppDbContext db, ITokenService tokenService) : Contr
             return Unauthorized(new MessageResponse { Message = "No perteneces a esa organización." });
 
         var result = tokenService.GenerateToken(usuario, request.OrganizacionId, membresia.Rol.Nombre);
+        logger.LogInformation("Selección de org exitosa: {Email} → org {OrgId} ({Rol})", usuario.Email, request.OrganizacionId, membresia.Rol.Nombre);
         return Ok(new AuthResponse { Token = result.Token, ExpiresAt = result.ExpiresAt });
     }
 }
