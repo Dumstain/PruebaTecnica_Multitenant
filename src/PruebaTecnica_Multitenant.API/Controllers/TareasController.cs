@@ -19,16 +19,10 @@ public class TareasController(AppDbContext db) : ControllerBase
 
     /// <summary>
     /// Devuelve todas las tareas de la organización del usuario autenticado.
-    /// Admin puede filtrar por estado y por usuario asignado.
-    /// Miembro solo puede filtrar por estado (siempre ve todas las tareas de su org).
+    /// Ambos roles pueden filtrar por estado y por usuario asignado.
     /// </summary>
-    /// <param name="estadoId">
-    /// Filtro opcional por estado:
-    /// 1 = Pendiente, 2 = En Progreso, 3 = Completado.
-    /// </param>
-    /// <param name="usuarioId">
-    /// Filtro opcional por usuario asignado. Solo aplica si el usuario autenticado es Admin.
-    /// </param>
+    /// <param name="estadoId">Filtro opcional: 1 = Pendiente · 2 = En Progreso · 3 = Completado.</param>
+    /// <param name="usuarioId">Filtro opcional por usuario asignado (UUID del miembro).</param>
     [HttpGet]
     [ProducesResponseType(typeof(List<TareaResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -44,8 +38,7 @@ public class TareasController(AppDbContext db) : ControllerBase
         if (estadoId.HasValue)
             query = query.Where(t => t.EstadoId == (int)estadoId.Value);
 
-        // El filtro por usuario asignado es exclusivo del Admin
-        if (User.IsAdmin() && usuarioId.HasValue)
+        if (usuarioId.HasValue)
             query = query.Where(t => t.UsuarioId == usuarioId.Value);
 
         return Ok(await query.Select(t => MapToResponse(t)).ToListAsync());
@@ -67,7 +60,8 @@ public class TareasController(AppDbContext db) : ControllerBase
 
     /// <summary>
     /// Crea una nueva tarea en estado Pendiente.
-    /// Admin puede asignarla a cualquier miembro de la org; Miembro solo a sí mismo.
+    /// El campo <c>usuarioId</c> es opcional: si no se envía, la tarea se asigna automáticamente al usuario autenticado.
+    /// Admin puede asignarla a cualquier miembro de la org; Miembro solo puede asignársela a sí mismo.
     /// </summary>
     [HttpPost]
     [ProducesResponseType(typeof(object),          StatusCodes.Status201Created)]
@@ -79,7 +73,11 @@ public class TareasController(AppDbContext db) : ControllerBase
         var orgId  = User.GetOrgId();
         var userId = User.GetUserId();
 
-        if (!User.IsAdmin() && request.UsuarioId != userId)
+        // Si no se manda usuarioId se asigna al usuario autenticado
+        var asignadoId = request.UsuarioId ?? userId;
+
+        // Miembro solo puede asignarse a sí mismo
+        if (!User.IsAdmin() && asignadoId != userId)
             return StatusCode(StatusCodes.Status403Forbidden,
                 new MessageResponse { Message = "Un Miembro solo puede crear tareas asignadas a sí mismo." });
 
@@ -87,7 +85,7 @@ public class TareasController(AppDbContext db) : ControllerBase
             return BadRequest(new MessageResponse { Message = "La fecha límite debe ser una fecha futura." });
 
         var asignadoEnOrg = await db.OrganizacionesUsuarios
-            .AnyAsync(ou => ou.OrganizacionId == orgId && ou.UsuarioId == request.UsuarioId);
+            .AnyAsync(ou => ou.OrganizacionId == orgId && ou.UsuarioId == asignadoId);
 
         if (!asignadoEnOrg)
             return BadRequest(new MessageResponse { Message = "El usuario asignado no pertenece a la organización." });
@@ -96,7 +94,7 @@ public class TareasController(AppDbContext db) : ControllerBase
         {
             Id              = Guid.NewGuid(),
             OrganizacionId  = orgId,
-            UsuarioId       = request.UsuarioId,
+            UsuarioId       = asignadoId,
             Titulo          = request.Titulo,
             Descripcion     = request.Descripcion,
             EstadoId        = 1, // Siempre inicia en Pendiente
