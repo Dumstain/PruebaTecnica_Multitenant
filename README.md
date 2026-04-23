@@ -158,8 +158,8 @@ Contraseña de todos los usuarios: **`Password123!`**
 
 ## Decisiones de diseño
 
-El diseno de el diagrama de bd fue completamente decisión propia sin ayuda de IA
-![alt text](image.png)
+El diagrama de bd fue completamente decisión propia sin ayuda de IA.
+![Diagrama de Base de datos](DiagramaBD.png)
 
 Esta sección documenta las decisiones arquitectónicas y técnicas tomadas durante el desarrollo, separando lo que estaba definido en el enunciado de lo que fue criterio propio.
 
